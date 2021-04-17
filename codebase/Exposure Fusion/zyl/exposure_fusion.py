@@ -1,9 +1,11 @@
 import cv2 as cv
 import numpy as np
-from PIL import Image
 import os
 import math
-from tqdm import tqdm
+
+
+def softmax(x):
+    return np.exp(x) / np.sum(np.exp(x), axis=0)
 
 
 def load_img(dir):                                                                                                      ## 载入图片
@@ -18,42 +20,27 @@ def load_img(dir):                                                              
     return imgs
 
 
-def cal_saturation(src, w):                                                                                             ## 计算饱和度
+def cal_saturation(src):                                                                                                ## 计算饱和度
 
-    rows = np.array(imgs).shape[1]
-    cols = np.array(imgs).shape[2]
-    for i in tqdm(range(rows)):
-        for j in range(cols):
-            m = np.mean([src[i][j][0], src[i][j][1], src[i][j][2]])
-            w[i][j] = math.sqrt(((m-src[i][j][0])**2 +
-                                 (m-src[i][j][1])**2 +
-                                 (m-src[i][j][2])**2) / 3)
+    return np.std(src, axis=2)
 
 
-def cal_contrast(src, w):                                                                                               ## 计算对比度
+def cal_contrast(src):                                                                                                  ## 计算对比度
 
-    rows = np.array(imgs).shape[1]
-    cols = np.array(imgs).shape[2]
     gray = cv.cvtColor(src, cv.COLOR_BGR2GRAY)
     ker = np.float32([[0, 1, 0], [1, -4, 1], [0, 1, 0]])
     lap = abs(cv.filter2D(gray, -1, kernel=ker))
-    for i in range(rows):
-        for j in range(cols):
-            w[i][j] = lap[i][j]
+    return lap
 
 
-def cal_wellexposedness(src, w, sigma=0.2):                                                                             ## 计算曝光度
+def cal_wellexposedness(src, sigma=0.2):                                                                                ## 计算曝光度
 
-    rows = np.array(imgs).shape[1]
-    cols = np.array(imgs).shape[2]
-    for i in range(rows):
-        for j in range(cols):
-            w[i][j] = math.exp(-0.5 * ( src[i][j][0]- 0.5)**2 / sigma**2) * \
-                      math.exp(-0.5 * (src[i][j][1] - 0.5)**2 / sigma**2) * \
-                      math.exp(-0.5 * (src[i][j][2] - 0.5)**2 / sigma**2)
+    w = np.exp(-0.5 * (src - 0.5)**2 / sigma**2)
+    w = np.prod(w, axis=2)
+    return w
 
 
-def  gaussian_pyramid(src):                                                                                             ## 生成高斯金字塔
+def gaussian_pyramid(src):                                                                                              ## 生成高斯金字塔
 
     rows = np.array(imgs).shape[1]
     cols = np.array(imgs).shape[2]
@@ -98,30 +85,28 @@ def naive_ef(imgs, wc=1, ws=1, we=1):
     img_sat = np.empty([img_num, rows, cols], dtype='float32')
     img_well = np.empty([img_num, rows, cols], dtype='float32')
     weight = np.ones([img_num, rows, cols], dtype='float32')
-    output = np.zeros([rows, cols, 3], dtype='float32')
 
     for k in range(img_num):                                                                                            ## 计算权重
-        cal_contrast(imgs[k], img_contrast[k])
-        cal_saturation(imgs[k], img_sat[k])
-        # print(img_sat[k])
-        cal_wellexposedness(imgs[k], img_well[k])
+        img_contrast[k] = cal_contrast(imgs[k])
+        img_sat[k] = cal_saturation(imgs[k])
+        img_well[k] = cal_wellexposedness(imgs[k])
         weight[k] = img_contrast[k]**wc * img_sat[k]**ws * img_well[k]**we + 1e-12
-    weight_total = np.sum(weight, 0)
-    # print(weight_total)
-    weight /= weight_total
-    # print(weight)
 
-    for i in tqdm(range(rows)):                                                                                         ## 按权重合成图像
-        for j in range(cols):
-            for k in range(img_num):
-                output[i][j][0] += (weight[k][i][j] * imgs[k][i][j][0])
-                output[i][j][1] += (weight[k][i][j] * imgs[k][i][j][1])
-                output[i][j][2] += (weight[k][i][j] * imgs[k][i][j][2])
+    weight = softmax(weight)                                                                                            # 归一化权重
+    # weight_total = np.sum(weight, 0)
+    # weight /= weight_total
+
+    # for k in range(img_num):                                                                                          # 保存权重图像
+    #     weight[k] *= 255
+    #     cv.imwrite("./outputs/naive_softmax_weight"+str(k)+".jpg", weight[k])
+
+    output = np.einsum('kij, kijc -> ijc', weight, imgs)                                                                ## 按权重合成图像
 
     for i in range(img_num):
         imgs[i] = cv.normalize(imgs[i], None, 0, 255, cv.NORM_MINMAX, cv.CV_8U)
     output = cv.normalize(output, None, 0, 255, cv.NORM_MINMAX, cv.CV_8U)
     return output, weight
+
 
 def pyramid_ef(imgs, wc=1, ws=1, we=1):
 
@@ -131,23 +116,20 @@ def pyramid_ef(imgs, wc=1, ws=1, we=1):
     _, weight = naive_ef(imgs, wc, ws, we)
     pyr = gaussian_pyramid(np.zeros([rows, cols, 3], dtype='float32'))
     pyr_len = len(pyr)
-    for k in range(img_num):
+
+    for k in range(img_num):                                                                                            # 按权重合成拉普拉斯金字塔
+        imgs[k] = cv.normalize(imgs[k], None, 0, 1, cv.NORM_MINMAX, cv.CV_32F)
         weight_pyr = gaussian_pyramid(weight[k])
-        img_pyr  = laplacian_pyramid(imgs[1])
+        img_pyr  = laplacian_pyramid(imgs[k])
         for l in range(pyr_len-1):
-            # w = cv.cvtColor(weight_pyr[l], cv.COLOR_GRAY2BGR)
-            # w = np.expand_dims(weight_pyr[l], axis=2)
-            G, L = np.asarray(weight_pyr[l]), np.asarray(img_pyr[pyr_len-2-l])
-            pyr[l] += np.einsum('ij, ijc -> ijc', G, L)
-            # pyr[l] += w*img_pyr[pyr_len-2-l]
-    # img_pyr = laplacian_pyramid(imgs[0])
-    # output = img_pyr[0]
-    # for l in range(1, pyr_len-1):
-    #     output = img_pyr[l] + cv.pyrUp(output)
-    output = pyr[pyr_len-2]
-    # for l in range(pyr_len):
+            w = cv.cvtColor(weight_pyr[l], cv.COLOR_GRAY2BGR)
+            pyr[l] += w*img_pyr[pyr_len-2-l]
+
+    # for l in range(pyr_len):                                                                                          # 保存加权的拉普拉斯金字塔
     #     pyr[l] = cv.normalize(pyr[l], None, 0, 255, cv.NORM_MINMAX, cv.CV_8U)
-    #     cv.imwrite("./outputs/pyr"+str(l)+".jpg", pyr[l])
+    #     cv.imwrite("./outputs/w_lap/"+str(l)+".jpg", pyr[l])
+
+    output = pyr[pyr_len - 2]                                                                                           # 依据拉普拉斯金字塔重建图像
     for l in range(pyr_len-3, -1, -1):
         output = pyr[l] + cv.pyrUp(output)
     output = cv.normalize(output, None, 0, 255, cv.NORM_MINMAX, cv.CV_8U)
@@ -162,11 +144,11 @@ if __name__ == '__main__':
     cols = np.array(imgs).shape[2]
     imgs = padding(imgs)
 
-    # naive_output,_ = naive_ef(imgs)
-    # naive_output_cut = naive_output[0:rows, 0:cols]
+    naive_output,_ = naive_ef(imgs)
+    naive_output_cut = naive_output[0:rows, 0:cols]
 
     pyramid_output = pyramid_ef(imgs)
     pyramid_output_cut = pyramid_output[0:rows, 0:cols]
 
-    # cv.imwrite("./outputs/Naive_output.jpg", naive_output_cut)
+    cv.imwrite("./outputs/Naive_output_softmax.jpg", naive_output_cut)
     cv.imwrite("./outputs/Pyramid_output.jpg", pyramid_output_cut)
