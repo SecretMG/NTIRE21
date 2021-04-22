@@ -1,6 +1,9 @@
 import cv2 as cv
 import numpy as np
 
+
+INF = 255
+
 def readImageSeq(locations):
     assert len(locations) > 1  # 至少要读到多于1张图片
 
@@ -13,3 +16,5 @@ def readImageSeq(locations):
     imgs = np.asarray(imgs)  # 从列表转换成numpy数组
 
     return imgs
+
+
